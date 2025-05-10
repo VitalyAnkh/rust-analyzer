@@ -1517,7 +1517,7 @@ fn main() {
             en Enum                      Enum
             fn function()                fn()
             fn main()                    fn()
-            lc variable                  &str
+            lc variable          &'static str
             ma helper!(…) macro_rules! helper
             ma m!(…)           macro_rules! m
             ma makro!(…)   macro_rules! makro
@@ -2124,5 +2124,72 @@ fn main() {
         expect![[r#"
             lb 'r#break
         "#]],
+    );
+}
+
+#[test]
+fn call_parens_with_newline() {
+    check_edit(
+        "foo",
+        r#"
+fn foo(v: i32) {}
+
+fn bar() {
+    foo$0
+    ()
+}
+    "#,
+        r#"
+fn foo(v: i32) {}
+
+fn bar() {
+    foo(${1:v});$0
+    ()
+}
+    "#,
+    );
+    check_edit(
+        "foo",
+        r#"
+struct Foo;
+impl Foo {
+    fn foo(&self, v: i32) {}
+}
+
+fn bar() {
+    Foo.foo$0
+    ()
+}
+    "#,
+        r#"
+struct Foo;
+impl Foo {
+    fn foo(&self, v: i32) {}
+}
+
+fn bar() {
+    Foo.foo(${1:v});$0
+    ()
+}
+    "#,
+    );
+}
+
+#[test]
+fn dbg_too_many_asterisks() {
+    check_edit(
+        "dbg",
+        r#"
+fn main() {
+    let x = &42;
+    let y = *x.$0;
+}
+    "#,
+        r#"
+fn main() {
+    let x = &42;
+    let y = dbg!(*x);
+}
+    "#,
     );
 }

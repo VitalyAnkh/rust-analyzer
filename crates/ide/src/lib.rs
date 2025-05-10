@@ -62,7 +62,7 @@ use std::panic::{AssertUnwindSafe, UnwindSafe};
 
 use cfg::CfgOptions;
 use fetch_crates::CrateInfo;
-use hir::{ChangeWithProcMacros, EditionedFileId, sym};
+use hir::{ChangeWithProcMacros, EditionedFileId, crate_def_map, sym};
 use ide_db::{
     FxHashMap, FxIndexSet, LineIndexDatabase,
     base_db::{
@@ -182,7 +182,7 @@ impl AnalysisHost {
     /// Returns a snapshot of the current state, which you can query for
     /// semantic information.
     pub fn analysis(&self) -> Analysis {
-        Analysis { db: self.db.snapshot() }
+        Analysis { db: self.db.clone() }
     }
 
     /// Applies changes to the current state of the world. If there are
@@ -627,7 +627,7 @@ impl Analysis {
 
     /// Returns true if this crate has `no_std` or `no_core` specified.
     pub fn is_crate_no_std(&self, crate_id: Crate) -> Cancellable<bool> {
-        self.with_db(|db| hir::db::DefDatabase::crate_def_map(db, crate_id).is_no_std())
+        self.with_db(|db| crate_def_map(db, crate_id).is_no_std())
     }
 
     /// Returns the root file of the given crate.
@@ -864,7 +864,7 @@ impl Analysis {
     where
         F: FnOnce(&RootDatabase) -> T + std::panic::UnwindSafe,
     {
-        let snap = self.db.snapshot();
+        let snap = self.db.clone();
         Cancelled::catch(|| f(&snap))
     }
 }

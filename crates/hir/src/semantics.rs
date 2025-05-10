@@ -15,7 +15,7 @@ use hir_def::{
     DefWithBodyId, FunctionId, MacroId, StructId, TraitId, VariantId,
     expr_store::{Body, ExprOrPatSource, path::Path},
     hir::{BindingId, Expr, ExprId, ExprOrPatId, Pat},
-    nameres::ModuleOrigin,
+    nameres::{ModuleOrigin, crate_def_map},
     resolver::{self, HasResolver, Resolver, TypeNs},
     type_ref::Mutability,
 };
@@ -25,7 +25,6 @@ use hir_expand::{
     builtin::{BuiltinFnLikeExpander, EagerExpander},
     db::ExpandDatabase,
     files::{FileRangeWrapper, InRealFile},
-    hygiene::SyntaxContextExt as _,
     inert_attr_macro::find_builtin_attr_idx,
     mod_path::{ModPath, PathKind},
     name::AsName,
@@ -342,7 +341,7 @@ impl<'db> SemanticsImpl<'db> {
         match file_id {
             HirFileId::FileId(file_id) => {
                 let module = self.file_to_module_defs(file_id.file_id(self.db)).next()?;
-                let def_map = self.db.crate_def_map(module.krate().id);
+                let def_map = crate_def_map(self.db, module.krate().id);
                 match def_map[module.id.local_id].origin {
                     ModuleOrigin::CrateRoot { .. } => None,
                     ModuleOrigin::File { declaration, declaration_tree_id, .. } => {
@@ -927,7 +926,7 @@ impl<'db> SemanticsImpl<'db> {
         token: InRealFile<SyntaxToken>,
         mut cb: impl FnMut(InFile<SyntaxToken>, SyntaxContext) -> ControlFlow<T>,
     ) -> Option<T> {
-        self.descend_into_macros_impl(token.clone(), &mut cb)
+        self.descend_into_macros_impl(token, &mut cb)
     }
 
     /// Descends the token into expansions, returning the tokens that matches the input
@@ -959,17 +958,13 @@ impl<'db> SemanticsImpl<'db> {
         let text = token.text();
         let kind = token.kind();
         if let Ok(token) = self.wrap_token_infile(token.clone()).into_real_file() {
-            self.descend_into_macros_breakable(
-                token.clone(),
-                |InFile { value, file_id: _ }, _ctx| {
-                    let mapped_kind = value.kind();
-                    let any_ident_match =
-                        || kind.is_any_identifier() && value.kind().is_any_identifier();
-                    let matches =
-                        (kind == mapped_kind || any_ident_match()) && text == value.text();
-                    if matches { ControlFlow::Break(value) } else { ControlFlow::Continue(()) }
-                },
-            )
+            self.descend_into_macros_breakable(token, |InFile { value, file_id: _ }, _ctx| {
+                let mapped_kind = value.kind();
+                let any_ident_match =
+                    || kind.is_any_identifier() && value.kind().is_any_identifier();
+                let matches = (kind == mapped_kind || any_ident_match()) && text == value.text();
+                if matches { ControlFlow::Break(value) } else { ControlFlow::Continue(()) }
+            })
         } else {
             None
         }
@@ -1716,13 +1711,13 @@ impl<'db> SemanticsImpl<'db> {
     }
 
     /// Returns none if the file of the node is not part of a crate.
-    fn analyze(&self, node: &SyntaxNode) -> Option<SourceAnalyzer> {
+    fn analyze(&self, node: &SyntaxNode) -> Option<SourceAnalyzer<'db>> {
         let node = self.find_file(node);
         self.analyze_impl(node, None, true)
     }
 
     /// Returns none if the file of the node is not part of a crate.
-    fn analyze_no_infer(&self, node: &SyntaxNode) -> Option<SourceAnalyzer> {
+    fn analyze_no_infer(&self, node: &SyntaxNode) -> Option<SourceAnalyzer<'db>> {
         let node = self.find_file(node);
         self.analyze_impl(node, None, false)
     }
@@ -1731,7 +1726,7 @@ impl<'db> SemanticsImpl<'db> {
         &self,
         node: &SyntaxNode,
         offset: TextSize,
-    ) -> Option<SourceAnalyzer> {
+    ) -> Option<SourceAnalyzer<'db>> {
         let node = self.find_file(node);
         self.analyze_impl(node, Some(offset), false)
     }
@@ -1742,7 +1737,7 @@ impl<'db> SemanticsImpl<'db> {
         offset: Option<TextSize>,
         // replace this, just make the inference result a `LazyCell`
         infer_body: bool,
-    ) -> Option<SourceAnalyzer> {
+    ) -> Option<SourceAnalyzer<'db>> {
         let _p = tracing::info_span!("SemanticsImpl::analyze_impl").entered();
 
         let container = self.with_ctx(|ctx| ctx.find_container(node))?;
@@ -1989,13 +1984,13 @@ fn find_root(node: &SyntaxNode) -> SyntaxNode {
 /// Note that if you are wondering "what does this specific existing name mean?",
 /// you'd better use the `resolve_` family of methods.
 #[derive(Debug)]
-pub struct SemanticsScope<'a> {
-    pub db: &'a dyn HirDatabase,
+pub struct SemanticsScope<'db> {
+    pub db: &'db dyn HirDatabase,
     file_id: HirFileId,
-    resolver: Resolver,
+    resolver: Resolver<'db>,
 }
 
-impl SemanticsScope<'_> {
+impl<'db> SemanticsScope<'db> {
     pub fn module(&self) -> Module {
         Module { id: self.resolver.module() }
     }
@@ -2011,7 +2006,7 @@ impl SemanticsScope<'_> {
         })
     }
 
-    pub(crate) fn resolver(&self) -> &Resolver {
+    pub(crate) fn resolver(&self) -> &Resolver<'db> {
         &self.resolver
     }
 
@@ -2138,7 +2133,7 @@ impl ops::Deref for VisibleTraits {
 struct RenameConflictsVisitor<'a> {
     db: &'a dyn HirDatabase,
     owner: DefWithBodyId,
-    resolver: Resolver,
+    resolver: Resolver<'a>,
     body: &'a Body,
     to_be_renamed: BindingId,
     new_name: Symbol,

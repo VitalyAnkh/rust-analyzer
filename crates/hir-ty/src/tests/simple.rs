@@ -2741,11 +2741,11 @@ impl B for Astruct {}
             715..744 '#[rust...1i32])': Box<[i32; 1], Global>
             737..743 '[1i32]': [i32; 1]
             738..742 '1i32': i32
-            755..756 'v': Vec<Box<dyn B, Global>, Global>
-            776..793 '<[_]> ...to_vec': fn into_vec<Box<dyn B, Global>, Global>(Box<[Box<dyn B, Global>], Global>) -> Vec<Box<dyn B, Global>, Global>
-            776..850 '<[_]> ...ct)]))': Vec<Box<dyn B, Global>, Global>
-            794..849 '#[rust...uct)])': Box<[Box<dyn B, Global>; 1], Global>
-            816..848 '[#[rus...ruct)]': [Box<dyn B, Global>; 1]
+            755..756 'v': Vec<Box<dyn B + 'static, Global>, Global>
+            776..793 '<[_]> ...to_vec': fn into_vec<Box<dyn B + 'static, Global>, Global>(Box<[Box<dyn B + 'static, Global>], Global>) -> Vec<Box<dyn B + 'static, Global>, Global>
+            776..850 '<[_]> ...ct)]))': Vec<Box<dyn B + 'static, Global>, Global>
+            794..849 '#[rust...uct)])': Box<[Box<dyn B + 'static, Global>; 1], Global>
+            816..848 '[#[rus...ruct)]': [Box<dyn B + 'static, Global>; 1]
             817..847 '#[rust...truct)': Box<Astruct, Global>
             839..846 'Astruct': Astruct
         "#]],
@@ -3899,6 +3899,30 @@ fn main() {
             162..165 'arg': i32
             167..187 '{     ...     }': ()
             177..180 'arg': i32
+        "#]],
+    );
+}
+
+#[test]
+fn regression_19734() {
+    check_infer(
+        r#"
+trait Foo {
+    type Gat<'o>;
+}
+
+trait Bar {
+    fn baz() -> <Self::Xyz as Foo::Gat<'_>>;
+}
+
+fn foo<T: Bar>() {
+    T::baz();
+}
+    "#,
+        expect![[r#"
+            110..127 '{     ...z(); }': ()
+            116..122 'T::baz': fn baz<T>() -> <{unknown} as Foo>::Gat<'?>
+            116..124 'T::baz()': Foo::Gat<'?, {unknown}>
         "#]],
     );
 }
