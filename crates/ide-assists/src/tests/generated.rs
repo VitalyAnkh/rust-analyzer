@@ -1737,7 +1737,7 @@ fn foo() {
     bar("", baz());
 }
 
-fn bar(arg: &str, baz: Baz) ${0:-> _} {
+fn bar(arg: &'static str, baz: Baz) ${0:-> _} {
     todo!()
 }
 
@@ -3476,6 +3476,23 @@ fn main() {
 fn main() {
     let foo = "Foo";
     let bar = "Bar";
+}
+"#####,
+    )
+}
+
+#[test]
+fn doctest_unwrap_type_to_generic_arg() {
+    check_doc_test(
+        "unwrap_type_to_generic_arg",
+        r#####"
+fn foo() -> $0Option<i32> {
+    todo!()
+}
+"#####,
+        r#####"
+fn foo() -> i32 {
+    todo!()
 }
 "#####,
     )

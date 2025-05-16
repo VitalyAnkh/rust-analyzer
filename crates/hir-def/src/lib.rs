@@ -64,8 +64,8 @@ use std::hash::{Hash, Hasher};
 
 use base_db::{Crate, impl_intern_key};
 use hir_expand::{
-    AstId, ExpandError, ExpandResult, ExpandTo, HirFileId, InFile, MacroCallId, MacroCallKind,
-    MacroDefId, MacroDefKind,
+    AstId, ExpandResult, ExpandTo, HirFileId, InFile, MacroCallId, MacroCallKind, MacroDefId,
+    MacroDefKind,
     builtin::{BuiltinAttrExpander, BuiltinDeriveExpander, BuiltinFnLikeExpander, EagerExpander},
     db::ExpandDatabase,
     eager::expand_eager_macro_input,
@@ -79,7 +79,7 @@ use la_arena::Idx;
 use nameres::DefMap;
 use span::{AstIdNode, Edition, FileAstId, SyntaxContext};
 use stdx::impl_from;
-use syntax::{AstNode, ast};
+use syntax::ast;
 
 pub use hir_expand::{Intern, Lookup, tt};
 
@@ -92,7 +92,7 @@ use crate::{
         Const, Enum, ExternCrate, Function, Impl, ItemTreeId, ItemTreeNode, Macro2, MacroRules,
         Static, Struct, Trait, TraitAlias, TypeAlias, Union, Use, Variant,
     },
-    nameres::LocalDefMap,
+    nameres::{LocalDefMap, block_def_map, crate_def_map, crate_local_def_map},
     signatures::VariantFields,
 };
 
@@ -324,12 +324,13 @@ pub struct CrateRootModuleId {
 }
 
 impl CrateRootModuleId {
-    pub fn def_map(&self, db: &dyn DefDatabase) -> Arc<DefMap> {
-        db.crate_def_map(self.krate)
+    pub fn def_map(self, db: &dyn DefDatabase) -> &DefMap {
+        crate_def_map(db, self.krate)
     }
 
-    pub(crate) fn local_def_map(&self, db: &dyn DefDatabase) -> (Arc<DefMap>, Arc<LocalDefMap>) {
-        db.crate_local_def_map(self.krate)
+    pub(crate) fn local_def_map(self, db: &dyn DefDatabase) -> (&DefMap, &LocalDefMap) {
+        let def_map = crate_local_def_map(db, self.krate);
+        (def_map.def_map(db), def_map.local(db))
     }
 
     pub fn krate(self) -> Crate {
@@ -390,26 +391,29 @@ pub struct ModuleId {
 }
 
 impl ModuleId {
-    pub fn def_map(self, db: &dyn DefDatabase) -> Arc<DefMap> {
+    pub fn def_map(self, db: &dyn DefDatabase) -> &DefMap {
         match self.block {
-            Some(block) => db.block_def_map(block),
-            None => db.crate_def_map(self.krate),
+            Some(block) => block_def_map(db, block),
+            None => crate_def_map(db, self.krate),
         }
     }
 
-    pub(crate) fn local_def_map(self, db: &dyn DefDatabase) -> (Arc<DefMap>, Arc<LocalDefMap>) {
+    pub(crate) fn local_def_map(self, db: &dyn DefDatabase) -> (&DefMap, &LocalDefMap) {
         match self.block {
-            Some(block) => (db.block_def_map(block), self.only_local_def_map(db)),
-            None => db.crate_local_def_map(self.krate),
+            Some(block) => (block_def_map(db, block), self.only_local_def_map(db)),
+            None => {
+                let def_map = crate_local_def_map(db, self.krate);
+                (def_map.def_map(db), def_map.local(db))
+            }
         }
     }
 
-    pub(crate) fn only_local_def_map(self, db: &dyn DefDatabase) -> Arc<LocalDefMap> {
-        db.crate_local_def_map(self.krate).1
+    pub(crate) fn only_local_def_map(self, db: &dyn DefDatabase) -> &LocalDefMap {
+        crate_local_def_map(db, self.krate).local(db)
     }
 
-    pub fn crate_def_map(self, db: &dyn DefDatabase) -> Arc<DefMap> {
-        db.crate_def_map(self.krate)
+    pub fn crate_def_map(self, db: &dyn DefDatabase) -> &DefMap {
+        crate_def_map(db, self.krate)
     }
 
     pub fn krate(self) -> Crate {
@@ -554,7 +558,7 @@ pub enum ItemContainerId {
 impl_from!(ModuleId for ItemContainerId);
 
 /// A Data Type
-#[derive(Debug, PartialOrd, Ord, Clone, Copy, PartialEq, Eq, Hash, salsa::Supertype)]
+#[derive(Debug, PartialOrd, Ord, Clone, Copy, PartialEq, Eq, Hash, salsa_macros::Supertype)]
 pub enum AdtId {
     StructId(StructId),
     UnionId(UnionId),
@@ -563,7 +567,7 @@ pub enum AdtId {
 impl_from!(StructId, UnionId, EnumId for AdtId);
 
 /// A macro
-#[derive(Debug, PartialOrd, Ord, Clone, Copy, PartialEq, Eq, Hash, salsa::Supertype)]
+#[derive(Debug, PartialOrd, Ord, Clone, Copy, PartialEq, Eq, Hash, salsa_macros::Supertype)]
 pub enum MacroId {
     Macro2Id(Macro2Id),
     MacroRulesId(MacroRulesId),
@@ -619,7 +623,7 @@ impl_from!(
 
 /// A constant, which might appears as a const item, an anonymous const block in expressions
 /// or patterns, or as a constant in types with const generics.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Supertype)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa_macros::Supertype)]
 pub enum GeneralConstId {
     ConstId(ConstId),
     StaticId(StaticId),
@@ -656,7 +660,7 @@ impl GeneralConstId {
 }
 
 /// The defs which have a body (have root expressions for type inference).
-#[derive(Debug, PartialOrd, Ord, Clone, Copy, PartialEq, Eq, Hash, salsa::Supertype)]
+#[derive(Debug, PartialOrd, Ord, Clone, Copy, PartialEq, Eq, Hash, salsa_macros::Supertype)]
 pub enum DefWithBodyId {
     FunctionId(FunctionId),
     StaticId(StaticId),
@@ -701,7 +705,17 @@ pub enum AssocItemId {
 // casting them, and somehow making the constructors private, which would be annoying.
 impl_from!(FunctionId, ConstId, TypeAliasId for AssocItemId);
 
-#[derive(Debug, PartialOrd, Ord, Clone, Copy, PartialEq, Eq, Hash, salsa::Supertype)]
+impl From<AssocItemId> for ModuleDefId {
+    fn from(item: AssocItemId) -> Self {
+        match item {
+            AssocItemId::FunctionId(f) => f.into(),
+            AssocItemId::ConstId(c) => c.into(),
+            AssocItemId::TypeAliasId(t) => t.into(),
+        }
+    }
+}
+
+#[derive(Debug, PartialOrd, Ord, Clone, Copy, PartialEq, Eq, Hash, salsa_macros::Supertype)]
 pub enum GenericDefId {
     AdtId(AdtId),
     // consts can have type parameters from their parents (i.e. associated consts of traits)
@@ -790,7 +804,7 @@ impl From<AssocItemId> for GenericDefId {
     }
 }
 
-#[derive(Debug, PartialOrd, Ord, Clone, Copy, PartialEq, Eq, Hash, salsa::Supertype)]
+#[derive(Debug, PartialOrd, Ord, Clone, Copy, PartialEq, Eq, Hash, salsa_macros::Supertype)]
 pub enum CallableDefId {
     FunctionId(FunctionId),
     StructId(StructId),
@@ -906,7 +920,7 @@ impl From<VariantId> for AttrDefId {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa::Supertype)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, salsa_macros::Supertype)]
 pub enum VariantId {
     EnumVariantId(EnumVariantId),
     StructId(StructId),
@@ -1166,66 +1180,6 @@ impl ModuleDefId {
         })
     }
 }
-
-// FIXME: Replace this with a plain function, it only has one impl
-/// A helper trait for converting to MacroCallId
-trait AsMacroCall {
-    fn as_call_id_with_errors(
-        &self,
-        db: &dyn ExpandDatabase,
-        krate: Crate,
-        resolver: impl Fn(&ModPath) -> Option<MacroDefId> + Copy,
-        eager_callback: &mut dyn FnMut(
-            InFile<(syntax::AstPtr<ast::MacroCall>, span::FileAstId<ast::MacroCall>)>,
-            MacroCallId,
-        ),
-    ) -> Result<ExpandResult<Option<MacroCallId>>, UnresolvedMacro>;
-}
-
-impl AsMacroCall for InFile<&ast::MacroCall> {
-    fn as_call_id_with_errors(
-        &self,
-        db: &dyn ExpandDatabase,
-        krate: Crate,
-        resolver: impl Fn(&ModPath) -> Option<MacroDefId> + Copy,
-        eager_callback: &mut dyn FnMut(
-            InFile<(syntax::AstPtr<ast::MacroCall>, span::FileAstId<ast::MacroCall>)>,
-            MacroCallId,
-        ),
-    ) -> Result<ExpandResult<Option<MacroCallId>>, UnresolvedMacro> {
-        let expands_to = hir_expand::ExpandTo::from_call_site(self.value);
-        let ast_id = AstId::new(self.file_id, db.ast_id_map(self.file_id).ast_id(self.value));
-        let span_map = db.span_map(self.file_id);
-        let path = self.value.path().and_then(|path| {
-            let range = path.syntax().text_range();
-            let mod_path = ModPath::from_src(db, path, &mut |range| {
-                span_map.as_ref().span_for_range(range).ctx
-            })?;
-            let call_site = span_map.span_for_range(range);
-            Some((call_site, mod_path))
-        });
-
-        let Some((call_site, path)) = path else {
-            return Ok(ExpandResult::only_err(ExpandError::other(
-                span_map.span_for_range(self.value.syntax().text_range()),
-                "malformed macro invocation",
-            )));
-        };
-
-        macro_call_as_call_id_with_eager(
-            db,
-            ast_id,
-            &path,
-            call_site.ctx,
-            expands_to,
-            krate,
-            resolver,
-            resolver,
-            eager_callback,
-        )
-    }
-}
-
 /// Helper wrapper for `AstId` with `ModPath`
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AstIdWithPath<T: AstIdNode> {
@@ -1239,41 +1193,14 @@ impl<T: AstIdNode> AstIdWithPath<T> {
     }
 }
 
-fn macro_call_as_call_id(
-    db: &dyn ExpandDatabase,
-    call: &AstIdWithPath<ast::MacroCall>,
-    call_site: SyntaxContext,
-    expand_to: ExpandTo,
-    krate: Crate,
-    resolver: impl Fn(&ModPath) -> Option<MacroDefId> + Copy,
-    eager_callback: &mut dyn FnMut(
-        InFile<(syntax::AstPtr<ast::MacroCall>, span::FileAstId<ast::MacroCall>)>,
-        MacroCallId,
-    ),
-) -> Result<Option<MacroCallId>, UnresolvedMacro> {
-    macro_call_as_call_id_with_eager(
-        db,
-        call.ast_id,
-        &call.path,
-        call_site,
-        expand_to,
-        krate,
-        resolver,
-        resolver,
-        eager_callback,
-    )
-    .map(|res| res.value)
-}
-
-fn macro_call_as_call_id_with_eager(
+pub fn macro_call_as_call_id(
     db: &dyn ExpandDatabase,
     ast_id: AstId<ast::MacroCall>,
     path: &ModPath,
     call_site: SyntaxContext,
     expand_to: ExpandTo,
     krate: Crate,
-    resolver: impl FnOnce(&ModPath) -> Option<MacroDefId>,
-    eager_resolver: impl Fn(&ModPath) -> Option<MacroDefId>,
+    resolver: impl Fn(&ModPath) -> Option<MacroDefId> + Copy,
     eager_callback: &mut dyn FnMut(
         InFile<(syntax::AstPtr<ast::MacroCall>, span::FileAstId<ast::MacroCall>)>,
         MacroCallId,
@@ -1289,7 +1216,7 @@ fn macro_call_as_call_id_with_eager(
             ast_id,
             def,
             call_site,
-            &|path| eager_resolver(path).filter(MacroDefId::is_fn_like),
+            &|path| resolver(path).filter(MacroDefId::is_fn_like),
             eager_callback,
         ),
         _ if def.is_fn_like() => ExpandResult {

@@ -7,7 +7,7 @@ use base_db::{
     SourceRoot, SourceRootId, SourceRootInput,
 };
 
-use hir_def::{ModuleId, db::DefDatabase};
+use hir_def::{ModuleId, db::DefDatabase, nameres::crate_def_map};
 use hir_expand::EditionedFileId;
 use rustc_hash::FxHashMap;
 use salsa::{AsDynDatabase, Durability};
@@ -16,7 +16,7 @@ use syntax::TextRange;
 use test_utils::extract_annotations;
 use triomphe::Arc;
 
-#[salsa::db]
+#[salsa_macros::db]
 #[derive(Clone)]
 pub(crate) struct TestDB {
     storage: salsa::Storage<Self>,
@@ -47,7 +47,7 @@ impl fmt::Debug for TestDB {
     }
 }
 
-#[salsa::db]
+#[salsa_macros::db]
 impl SourceDatabase for TestDB {
     fn file_text(&self, file_id: base_db::FileId) -> FileText {
         self.files.file_text(file_id)
@@ -102,7 +102,7 @@ impl SourceDatabase for TestDB {
     }
 }
 
-#[salsa::db]
+#[salsa_macros::db]
 impl salsa::Database for TestDB {
     fn salsa_event(&self, event: &dyn std::ops::Fn() -> salsa::Event) {
         let mut events = self.events.lock().unwrap();
@@ -118,7 +118,7 @@ impl TestDB {
     pub(crate) fn module_for_file_opt(&self, file_id: impl Into<FileId>) -> Option<ModuleId> {
         let file_id = file_id.into();
         for &krate in self.relevant_crates(file_id).iter() {
-            let crate_def_map = self.crate_def_map(krate);
+            let crate_def_map = crate_def_map(self, krate);
             for (local_id, data) in crate_def_map.modules() {
                 if data.origin.file_id().map(|file_id| file_id.file_id(self)) == Some(file_id) {
                     return Some(crate_def_map.module_id(local_id));
@@ -137,7 +137,7 @@ impl TestDB {
     ) -> FxHashMap<EditionedFileId, Vec<(TextRange, String)>> {
         let mut files = Vec::new();
         for &krate in self.all_crates().iter() {
-            let crate_def_map = self.crate_def_map(krate);
+            let crate_def_map = crate_def_map(self, krate);
             for (module_id, _) in crate_def_map.modules() {
                 let file_id = crate_def_map[module_id].origin.file_id();
                 files.extend(file_id)

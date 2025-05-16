@@ -47,7 +47,6 @@ pub(crate) fn unresolved_method(
         }),
     )
     .with_fixes(fixes(ctx, d))
-    .experimental()
 }
 
 fn fixes(ctx: &DiagnosticsContext<'_>, d: &hir::UnresolvedMethodCall) -> Option<Vec<Assist>> {
@@ -269,7 +268,7 @@ impl<T, U> A<T, U> {
 }
 fn main() {
     let a = A {a: 0, b: ""};
-    A::<i32, &str>::foo();
+    A::<i32, &'static str>::foo();
 }
 "#,
         );

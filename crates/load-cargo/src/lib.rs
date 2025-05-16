@@ -292,7 +292,7 @@ impl ProjectFolders {
             };
 
             let file_set_roots = vec![VfsPath::from(ratoml_path.to_owned())];
-            let entry = vfs::loader::Entry::Files(vec![ratoml_path.to_owned()]);
+            let entry = vfs::loader::Entry::Files(vec![ratoml_path]);
 
             res.watch.push(res.load.len());
             res.load.push(entry);
@@ -511,10 +511,6 @@ impl ProcMacroExpander for Expander {
             Ok(Err(err)) => Err(ProcMacroExpansionError::Panic(err.0)),
             Err(err) => Err(ProcMacroExpansionError::System(err.to_string())),
         }
-    }
-
-    fn eq_dyn(&self, other: &dyn ProcMacroExpander) -> bool {
-        other.as_any().downcast_ref::<Self>().is_some_and(|other| self == other)
     }
 }
 

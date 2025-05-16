@@ -46,7 +46,6 @@ pub(super) const ATOM_EXPR_FIRST: TokenSet =
         T!['['],
         T![|],
         T![async],
-        T![box],
         T![break],
         T![const],
         T![continue],
@@ -68,7 +67,8 @@ pub(super) const ATOM_EXPR_FIRST: TokenSet =
         LIFETIME_IDENT,
     ]));
 
-pub(super) const EXPR_RECOVERY_SET: TokenSet = TokenSet::new(&[T![')'], T![']']]);
+pub(in crate::grammar) const EXPR_RECOVERY_SET: TokenSet =
+    TokenSet::new(&[T!['}'], T![')'], T![']'], T![,]]);
 
 pub(super) fn atom_expr(
     p: &mut Parser<'_>,
@@ -381,10 +381,14 @@ fn parse_asm_expr(p: &mut Parser<'_>, m: Marker) -> Option<CompletedMarker> {
             op.complete(p, ASM_REG_OPERAND);
             op_n.complete(p, ASM_OPERAND_NAMED);
         } else if p.eat_contextual_kw(T![label]) {
+            // test asm_label
+            // fn foo() {
+            //     builtin#asm("", label {});
+            // }
             dir_spec.abandon(p);
             block_expr(p);
-            op.complete(p, ASM_OPERAND_NAMED);
-            op_n.complete(p, ASM_LABEL);
+            op.complete(p, ASM_LABEL);
+            op_n.complete(p, ASM_OPERAND_NAMED);
         } else if p.eat(T![const]) {
             dir_spec.abandon(p);
             expr(p);
