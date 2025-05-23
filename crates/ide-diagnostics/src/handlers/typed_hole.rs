@@ -37,6 +37,7 @@ pub(crate) fn typed_hole(ctx: &DiagnosticsContext<'_>, d: &hir::TypedHole) -> Di
     };
 
     Diagnostic::new(DiagnosticCode::RustcHardError("typed-hole"), message, display_range)
+        .stable()
         .with_fixes(fixes)
 }
 
@@ -151,7 +152,7 @@ fn main() {
 fn main() {
     let mut x = t();
     x = _;
-      //^ 💡 error: invalid `_` expression, expected type `&str`
+      //^ 💡 error: invalid `_` expression, expected type `&'static str`
     x = "";
 }
 fn t<T>() -> T { loop {} }

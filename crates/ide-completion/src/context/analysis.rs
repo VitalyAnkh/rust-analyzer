@@ -387,11 +387,7 @@ fn expand(
 
     match (
         sema.expand_macro_call(&actual_macro_call),
-        sema.speculative_expand_macro_call(
-            &actual_macro_call,
-            &speculative_args,
-            fake_ident_token.clone(),
-        ),
+        sema.speculative_expand_macro_call(&actual_macro_call, &speculative_args, fake_ident_token),
     ) {
         // successful expansions
         (Some(actual_expansion), Some((fake_expansion, fake_mapped_tokens))) => {
@@ -661,9 +657,8 @@ fn expected_type_and_name(
                             ))
                         } else {
                             cov_mark::hit!(expected_type_struct_field_without_leading_char);
-                            let expr_field = token.prev_sibling_or_token()?
-                                .into_node()
-                                .and_then(ast::RecordExprField::cast)?;
+                            cov_mark::hit!(expected_type_struct_field_followed_by_comma);
+                            let expr_field = previous_non_trivia_token(token.clone())?.parent().and_then(ast::RecordExprField::cast)?;
                             let (_, _, ty) = sema.resolve_record_field(&expr_field)?;
                             Some((
                                 Some(ty),
@@ -681,7 +676,6 @@ fn expected_type_and_name(
                             .or_else(|| sema.type_of_expr(&expr).map(TypeInfo::original));
                         (ty, field_name)
                     } else {
-                        cov_mark::hit!(expected_type_struct_field_followed_by_comma);
                         (field_ty, field_name)
                     }
                 },
@@ -889,9 +883,10 @@ fn classify_name_ref(
             },
             ast::MethodCallExpr(method) => {
                 let receiver = find_opt_node_in_file(original_file, method.receiver());
+                let has_parens = has_parens(&method);
                 let kind = NameRefKind::DotAccess(DotAccess {
                     receiver_ty: receiver.as_ref().and_then(|it| sema.type_of_expr(it)),
-                    kind: DotAccessKind::Method { has_parens: method.arg_list().is_some_and(|it| it.l_paren_token().is_some()) },
+                    kind: DotAccessKind::Method { has_parens },
                     receiver,
                     ctx: DotAccessExprCtx { in_block_expr: is_in_block(method.syntax()), in_breakable: is_in_breakable(method.syntax()) }
                 });
@@ -1378,7 +1373,7 @@ fn classify_name_ref(
                         }
                     }
 
-                    path_ctx.has_call_parens = it.syntax().parent().is_some_and(|it| ast::CallExpr::can_cast(it.kind()));
+                    path_ctx.has_call_parens = it.syntax().parent().is_some_and(|it| ast::CallExpr::cast(it).is_some_and(|it| has_parens(&it)));
 
                     make_path_kind_expr(it.into())
                 },
@@ -1407,7 +1402,7 @@ fn classify_name_ref(
                         match parent {
                             ast::PathType(it) => make_path_kind_type(it.into()),
                             ast::PathExpr(it) => {
-                                path_ctx.has_call_parens = it.syntax().parent().is_some_and(|it| ast::CallExpr::can_cast(it.kind()));
+                                path_ctx.has_call_parens = it.syntax().parent().is_some_and(|it| ast::CallExpr::cast(it).is_some_and(|it| has_parens(&it)));
 
                                 make_path_kind_expr(it.into())
                             },
@@ -1563,6 +1558,30 @@ fn classify_name_ref(
         }
     }
     Some((NameRefContext { nameref, kind: NameRefKind::Path(path_ctx) }, qualifier_ctx))
+}
+
+/// When writing in the middle of some code the following situation commonly occurs (`|` denotes the cursor):
+/// ```ignore
+/// value.method|
+/// (1, 2, 3)
+/// ```
+/// Here, we want to complete the method parentheses & arguments (if the corresponding settings are on),
+/// but the thing is parsed as a method call with parentheses. Therefore we use heuristics: if the parentheses
+/// are on the next line, consider them non-existent.
+fn has_parens(node: &dyn HasArgList) -> bool {
+    let Some(arg_list) = node.arg_list() else { return false };
+    if arg_list.l_paren_token().is_none() {
+        return false;
+    }
+    let prev_siblings = iter::successors(arg_list.syntax().prev_sibling_or_token(), |it| {
+        it.prev_sibling_or_token()
+    });
+    prev_siblings
+        .take_while(|syntax| syntax.kind().is_trivia())
+        .filter_map(|syntax| {
+            syntax.into_token().filter(|token| token.kind() == SyntaxKind::WHITESPACE)
+        })
+        .all(|whitespace| !whitespace.text().contains('\n'))
 }
 
 fn pattern_context_for(
