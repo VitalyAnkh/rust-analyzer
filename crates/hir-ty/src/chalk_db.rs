@@ -259,7 +259,7 @@ impl chalk_solve::RustIrDatabase<Interner> for ChalkContext<'_> {
     }
     fn well_known_trait_id(
         &self,
-        well_known_trait: rust_ir::WellKnownTrait,
+        well_known_trait: WellKnownTrait,
     ) -> Option<chalk_ir::TraitId<Interner>> {
         let lang_attr = lang_item_from_well_known_trait(well_known_trait);
         let trait_ = lang_attr.resolve_trait(self.db, self.krate)?;
@@ -637,7 +637,10 @@ pub(crate) fn associated_ty_data_query(
         .fill_with_bound_vars(crate::DebruijnIndex::INNERMOST, 0)
         .build();
     let pro_ty = TyBuilder::assoc_type_projection(db, type_alias, Some(trait_subst))
-        .fill_with_bound_vars(crate::DebruijnIndex::INNERMOST, generic_params.len_self())
+        .fill_with_bound_vars(
+            crate::DebruijnIndex::INNERMOST,
+            generic_params.parent_generics().map_or(0, |it| it.len()),
+        )
         .build();
     let self_ty = TyKind::Alias(AliasTy::Projection(pro_ty)).intern(Interner);
 
