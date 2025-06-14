@@ -32,7 +32,7 @@ use triomphe::Arc;
 
 use crate::{
     CallableDefId, ClosureId, ComplexMemoryMap, Const, ConstData, ConstScalar, FnDefId, Interner,
-    MemoryMap, Substitution, TraitEnvironment, Ty, TyBuilder, TyExt, TyKind,
+    MemoryMap, Substitution, ToChalk, TraitEnvironment, Ty, TyBuilder, TyExt, TyKind,
     consteval::{ConstEvalError, intern_const_scalar, try_const_usize},
     db::{HirDatabase, InternedClosure},
     display::{ClosureStyle, DisplayTarget, HirDisplay},
@@ -47,7 +47,7 @@ use crate::{
 
 use super::{
     AggregateKind, BasicBlockId, BinOp, CastKind, LocalId, MirBody, MirLowerError, MirSpan,
-    Operand, Place, PlaceElem, ProjectionElem, ProjectionStore, Rvalue, StatementKind,
+    Operand, OperandKind, Place, PlaceElem, ProjectionElem, ProjectionStore, Rvalue, StatementKind,
     TerminatorKind, UnOp, return_slot,
 };
 
@@ -856,10 +856,10 @@ impl Evaluator<'_> {
     }
 
     fn operand_ty(&self, o: &Operand, locals: &Locals) -> Result<Ty> {
-        Ok(match o {
-            Operand::Copy(p) | Operand::Move(p) => self.place_ty(p, locals)?,
-            Operand::Constant(c) => c.data(Interner).ty.clone(),
-            &Operand::Static(s) => {
+        Ok(match &o.kind {
+            OperandKind::Copy(p) | OperandKind::Move(p) => self.place_ty(p, locals)?,
+            OperandKind::Constant(c) => c.data(Interner).ty.clone(),
+            &OperandKind::Static(s) => {
                 let ty = self.db.infer(s.into())[self.db.body(s.into()).body_expr].clone();
                 TyKind::Ref(Mutability::Not, static_lifetime(), ty).intern(Interner)
             }
@@ -1873,16 +1873,16 @@ impl Evaluator<'_> {
     }
 
     fn eval_operand(&mut self, it: &Operand, locals: &mut Locals) -> Result<Interval> {
-        Ok(match it {
-            Operand::Copy(p) | Operand::Move(p) => {
+        Ok(match &it.kind {
+            OperandKind::Copy(p) | OperandKind::Move(p) => {
                 locals.drop_flags.remove_place(p, &locals.body.projection_store);
                 self.eval_place(p, locals)?
             }
-            Operand::Static(st) => {
+            OperandKind::Static(st) => {
                 let addr = self.eval_static(*st, locals)?;
                 Interval::new(addr, self.ptr_size())
             }
-            Operand::Constant(konst) => self.allocate_const_in_heap(locals, konst)?,
+            OperandKind::Constant(konst) => self.allocate_const_in_heap(locals, konst)?,
         })
     }
 
@@ -2771,12 +2771,15 @@ impl Evaluator<'_> {
             Err(e) => {
                 let db = self.db;
                 let loc = variant.lookup(db);
-                let enum_loc = loc.parent.lookup(db);
                 let edition = self.crate_id.data(self.db).edition;
                 let name = format!(
                     "{}::{}",
-                    enum_loc.id.item_tree(db)[enum_loc.id.value].name.display(db, edition),
-                    loc.id.item_tree(db)[loc.id.value].name.display(db, edition),
+                    self.db.enum_signature(loc.parent).name.display(db, edition),
+                    self.db
+                        .enum_variants(loc.parent)
+                        .variant_name_by_id(variant)
+                        .unwrap()
+                        .display(db, edition),
                 );
                 Err(MirEvalError::ConstEvalError(name, Box::new(e)))
             }
@@ -2927,7 +2930,7 @@ pub fn render_const_using_debug_impl(
     let a2 = evaluator.heap_allocate(evaluator.ptr_size() * 2, evaluator.ptr_size())?;
     evaluator.write_memory(a2, &data.addr.to_bytes())?;
     let debug_fmt_fn_ptr = evaluator.vtable_map.id(TyKind::FnDef(
-        db.intern_callable_def(debug_fmt_fn.into()).into(),
+        CallableDefId::FunctionId(debug_fmt_fn).to_chalk(db),
         Substitution::from1(Interner, c.data(Interner).ty.clone()),
     )
     .intern(Interner));

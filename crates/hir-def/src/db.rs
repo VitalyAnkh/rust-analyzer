@@ -1,17 +1,20 @@
 //! Defines database & queries for name resolution.
 use base_db::{Crate, RootQueryDb, SourceDatabase};
 use either::Either;
-use hir_expand::{EditionedFileId, HirFileId, MacroCallId, MacroDefId, db::ExpandDatabase};
-use intern::sym;
+use hir_expand::{
+    EditionedFileId, HirFileId, InFile, Lookup, MacroCallId, MacroDefId, MacroDefKind,
+    db::ExpandDatabase,
+};
+use intern::{Symbol, sym};
 use la_arena::ArenaMap;
 use syntax::{AstPtr, ast};
 use thin_vec::ThinVec;
 use triomphe::Arc;
 
 use crate::{
-    AttrDefId, BlockId, BlockLoc, ConstId, ConstLoc, DefWithBodyId, EnumId, EnumLoc, EnumVariantId,
-    EnumVariantLoc, ExternBlockId, ExternBlockLoc, ExternCrateId, ExternCrateLoc, FunctionId,
-    FunctionLoc, GenericDefId, ImplId, ImplLoc, LocalFieldId, Macro2Id, Macro2Loc, MacroId,
+    AttrDefId, ConstId, ConstLoc, DefWithBodyId, EnumId, EnumLoc, EnumVariantId, EnumVariantLoc,
+    ExternBlockId, ExternBlockLoc, ExternCrateId, ExternCrateLoc, FunctionId, FunctionLoc,
+    GenericDefId, ImplId, ImplLoc, LocalFieldId, Macro2Id, Macro2Loc, MacroExpander, MacroId,
     MacroRulesId, MacroRulesLoc, MacroRulesLocFlags, ProcMacroId, ProcMacroLoc, StaticId,
     StaticLoc, StructId, StructLoc, TraitAliasId, TraitAliasLoc, TraitId, TraitLoc, TypeAliasId,
     TypeAliasLoc, UnionId, UnionLoc, UseId, UseLoc, VariantId,
@@ -21,11 +24,11 @@ use crate::{
     },
     hir::generics::GenericParams,
     import_map::ImportMap,
-    item_tree::{AttrOwner, ItemTree},
+    item_tree::{ItemTree, file_item_tree_query},
     lang_item::{self, LangItem},
     nameres::{
-        DefMap, LocalDefMap,
         assoc::{ImplItems, TraitItems},
+        crate_def_map,
         diagnostics::DefDiagnostics,
     },
     signatures::{
@@ -93,9 +96,6 @@ pub trait InternDatabase: RootQueryDb {
     #[salsa::interned]
     fn intern_macro_rules(&self, loc: MacroRulesLoc) -> MacroRulesId;
     // // endregion: items
-
-    #[salsa::interned]
-    fn intern_block(&self, loc: BlockLoc) -> BlockId;
 }
 
 #[query_group::query_group]
@@ -105,21 +105,9 @@ pub trait DefDatabase: InternDatabase + ExpandDatabase + SourceDatabase {
     fn expand_proc_attr_macros(&self) -> bool;
 
     /// Computes an [`ItemTree`] for the given file or macro expansion.
-    #[salsa::invoke(ItemTree::file_item_tree_query)]
-    fn file_item_tree(&self, file_id: HirFileId) -> Arc<ItemTree>;
-
-    #[salsa::invoke(ItemTree::block_item_tree_query)]
-    fn block_item_tree(&self, block_id: BlockId) -> Arc<ItemTree>;
-
-    #[salsa::invoke(DefMap::crate_local_def_map_query)]
-    fn crate_local_def_map(&self, krate: Crate) -> (Arc<DefMap>, Arc<LocalDefMap>);
-
-    #[salsa::invoke(DefMap::crate_def_map_query)]
-    fn crate_def_map(&self, krate: Crate) -> Arc<DefMap>;
-
-    /// Computes the block-level `DefMap`.
-    #[salsa::invoke(DefMap::block_def_map_query)]
-    fn block_def_map(&self, block: BlockId) -> Arc<DefMap>;
+    #[salsa::invoke(file_item_tree_query)]
+    #[salsa::transparent]
+    fn file_item_tree(&self, file_id: HirFileId) -> &ItemTree;
 
     /// Turns a MacroId into a MacroDefId, describing the macro's definition post name resolution.
     #[salsa::invoke(macro_def)]
@@ -133,6 +121,8 @@ pub trait DefDatabase: InternDatabase + ExpandDatabase + SourceDatabase {
         id: VariantId,
     ) -> (Arc<VariantFields>, Arc<ExpressionStoreSourceMap>);
 
+    // FIXME: Should we make this transparent? The only unstable thing in `enum_variants_with_diagnostics()`
+    // is ast ids, and ast ids are pretty stable now.
     #[salsa::tracked]
     fn enum_variants(&self, id: EnumId) -> Arc<EnumVariants> {
         self.enum_variants_with_diagnostics(id).0
@@ -273,6 +263,9 @@ pub trait DefDatabase: InternDatabase + ExpandDatabase + SourceDatabase {
         e: TypeAliasId,
     ) -> (Arc<TypeAliasSignature>, Arc<ExpressionStoreSourceMap>);
 
+    #[salsa::invoke(crate::signatures::extern_block_abi_query)]
+    fn extern_block_abi(&self, extern_block: ExternBlockId) -> Option<Symbol>;
+
     // endregion:data
 
     #[salsa::invoke(Body::body_with_source_map_query)]
@@ -363,7 +356,7 @@ fn include_macro_invoc(
     db: &dyn DefDatabase,
     krate: Crate,
 ) -> Arc<[(MacroCallId, EditionedFileId)]> {
-    db.crate_def_map(krate)
+    crate_def_map(db, krate)
         .modules
         .values()
         .flat_map(|m| m.scope.iter_macro_invoc())
@@ -378,7 +371,7 @@ fn include_macro_invoc(
 fn crate_supports_no_std(db: &dyn DefDatabase, crate_id: Crate) -> bool {
     let file = crate_id.data(db).root_file_id(db);
     let item_tree = db.file_item_tree(file.into());
-    let attrs = item_tree.raw_attrs(AttrOwner::TopLevel);
+    let attrs = item_tree.top_level_raw_attrs();
     for attr in &**attrs {
         match attr.path().as_ident() {
             Some(ident) if *ident == sym::no_std => return true,
@@ -409,10 +402,6 @@ fn crate_supports_no_std(db: &dyn DefDatabase, crate_id: Crate) -> bool {
 }
 
 fn macro_def(db: &dyn DefDatabase, id: MacroId) -> MacroDefId {
-    use hir_expand::InFile;
-
-    use crate::{Lookup, MacroDefKind, MacroExpander};
-
     let kind = |expander, file_id, m| {
         let in_file = InFile::new(file_id, m);
         match expander {
@@ -428,11 +417,9 @@ fn macro_def(db: &dyn DefDatabase, id: MacroId) -> MacroDefId {
         MacroId::Macro2Id(it) => {
             let loc: Macro2Loc = it.lookup(db);
 
-            let item_tree = loc.id.item_tree(db);
-            let makro = &item_tree[loc.id.value];
             MacroDefId {
                 krate: loc.container.krate,
-                kind: kind(loc.expander, loc.id.file_id(), makro.ast_id.upcast()),
+                kind: kind(loc.expander, loc.id.file_id, loc.id.value.upcast()),
                 local_inner: false,
                 allow_internal_unsafe: loc.allow_internal_unsafe,
                 edition: loc.edition,
@@ -441,11 +428,9 @@ fn macro_def(db: &dyn DefDatabase, id: MacroId) -> MacroDefId {
         MacroId::MacroRulesId(it) => {
             let loc: MacroRulesLoc = it.lookup(db);
 
-            let item_tree = loc.id.item_tree(db);
-            let makro = &item_tree[loc.id.value];
             MacroDefId {
                 krate: loc.container.krate,
-                kind: kind(loc.expander, loc.id.file_id(), makro.ast_id.upcast()),
+                kind: kind(loc.expander, loc.id.file_id, loc.id.value.upcast()),
                 local_inner: loc.flags.contains(MacroRulesLocFlags::LOCAL_INNER),
                 allow_internal_unsafe: loc
                     .flags
@@ -456,15 +441,9 @@ fn macro_def(db: &dyn DefDatabase, id: MacroId) -> MacroDefId {
         MacroId::ProcMacroId(it) => {
             let loc = it.lookup(db);
 
-            let item_tree = loc.id.item_tree(db);
-            let makro = &item_tree[loc.id.value];
             MacroDefId {
                 krate: loc.container.krate,
-                kind: MacroDefKind::ProcMacro(
-                    InFile::new(loc.id.file_id(), makro.ast_id),
-                    loc.expander,
-                    loc.kind,
-                ),
+                kind: MacroDefKind::ProcMacro(loc.id, loc.expander, loc.kind),
                 local_inner: false,
                 allow_internal_unsafe: false,
                 edition: loc.edition,

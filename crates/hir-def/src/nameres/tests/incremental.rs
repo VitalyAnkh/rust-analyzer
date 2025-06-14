@@ -7,24 +7,37 @@ use span::Edition;
 use test_fixture::WithFixture;
 use triomphe::Arc;
 
-use crate::{AdtId, ModuleDefId, db::DefDatabase, nameres::tests::TestDB};
+use crate::{
+    AdtId, ModuleDefId,
+    db::DefDatabase,
+    nameres::{crate_def_map, tests::TestDB},
+};
 
-fn check_def_map_is_not_recomputed(ra_fixture_initial: &str, ra_fixture_change: &str) {
+fn check_def_map_is_not_recomputed(
+    #[rust_analyzer::rust_fixture] ra_fixture_initial: &str,
+    #[rust_analyzer::rust_fixture] ra_fixture_change: &str,
+) {
     let (mut db, pos) = TestDB::with_position(ra_fixture_initial);
     let krate = db.fetch_test_crate();
     {
         let events = db.log_executed(|| {
-            db.crate_def_map(krate);
+            crate_def_map(&db, krate);
         });
-        assert!(format!("{events:?}").contains("crate_def_map"), "{events:#?}")
+        assert!(
+            format!("{events:?}").contains("crate_local_def_map"),
+            "no crate def map computed:\n{events:#?}",
+        )
     }
     db.set_file_text(pos.file_id.file_id(&db), ra_fixture_change);
 
     {
         let events = db.log_executed(|| {
-            db.crate_def_map(krate);
+            crate_def_map(&db, krate);
         });
-        assert!(!format!("{events:?}").contains("crate_def_map"), "{events:#?}")
+        assert!(
+            !format!("{events:?}").contains("crate_local_def_map"),
+            "crate def map invalidated:\n{events:#?}",
+        )
     }
 }
 
@@ -44,7 +57,7 @@ pub const BAZ: u32 = 0;
     );
 
     for &krate in db.all_crates().iter() {
-        db.crate_def_map(krate);
+        crate_def_map(&db, krate);
     }
 
     let all_crates_before = db.all_crates();
@@ -94,11 +107,11 @@ pub const BAZ: u32 = 0;
 
     let events = db.log_executed(|| {
         for &krate in db.all_crates().iter() {
-            db.crate_def_map(krate);
+            crate_def_map(&db, krate);
         }
     });
     let invalidated_def_maps =
-        events.iter().filter(|event| event.contains("crate_def_map")).count();
+        events.iter().filter(|event| event.contains("crate_local_def_map")).count();
     assert_eq!(invalidated_def_maps, 1, "{events:#?}")
 }
 
@@ -330,12 +343,12 @@ m!(Z);
     let krate = db.test_crate();
     {
         let events = db.log_executed(|| {
-            let crate_def_map = db.crate_def_map(krate);
+            let crate_def_map = crate_def_map(&db, krate);
             let (_, module_data) = crate_def_map.modules.iter().last().unwrap();
             assert_eq!(module_data.scope.resolutions().count(), 4);
         });
         let n_recalculated_item_trees =
-            events.iter().filter(|it| it.contains("file_item_tree_shim")).count();
+            events.iter().filter(|it| it.contains("file_item_tree_query")).count();
         assert_eq!(n_recalculated_item_trees, 6);
         let n_reparsed_macros =
             events.iter().filter(|it| it.contains("parse_macro_expansion_shim")).count();
@@ -352,12 +365,12 @@ m!(Z);
 
     {
         let events = db.log_executed(|| {
-            let crate_def_map = db.crate_def_map(krate);
+            let crate_def_map = crate_def_map(&db, krate);
             let (_, module_data) = crate_def_map.modules.iter().last().unwrap();
             assert_eq!(module_data.scope.resolutions().count(), 4);
         });
         let n_recalculated_item_trees =
-            events.iter().filter(|it| it.contains("file_item_tree_shim")).count();
+            events.iter().filter(|it| it.contains("file_item_tree_query")).count();
         assert_eq!(n_recalculated_item_trees, 1, "{events:#?}");
         let n_reparsed_macros =
             events.iter().filter(|it| it.contains("parse_macro_expansion_shim")).count();
@@ -392,10 +405,10 @@ pub type Ty = ();
             db.file_item_tree(pos.file_id.into());
         });
         let n_calculated_item_trees =
-            events.iter().filter(|it| it.contains("file_item_tree_shim")).count();
-        assert_eq!(n_calculated_item_trees, 1);
+            events.iter().filter(|it| it.contains("file_item_tree_query")).count();
+        assert_eq!(n_calculated_item_trees, 1, "{events:#?}");
         let n_parsed_files = events.iter().filter(|it| it.contains("parse")).count();
-        assert_eq!(n_parsed_files, 1);
+        assert_eq!(n_parsed_files, 1, "{events:#?}");
     }
 
     // FIXME(salsa-transition): bring this back
@@ -403,7 +416,7 @@ pub type Ty = ();
 
     {
         let events = db.log_executed(|| {
-            let crate_def_map = db.crate_def_map(krate);
+            let crate_def_map = crate_def_map(&db, krate);
             let (_, module_data) = crate_def_map.modules.iter().last().unwrap();
             assert_eq!(module_data.scope.resolutions().count(), 8);
             assert_eq!(module_data.scope.impls().count(), 1);
@@ -433,6 +446,6 @@ pub type Ty = ();
             }
         });
         let n_reparsed_files = events.iter().filter(|it| it.contains("parse(")).count();
-        assert_eq!(n_reparsed_files, 0);
+        assert_eq!(n_reparsed_files, 0, "{events:?}");
     }
 }

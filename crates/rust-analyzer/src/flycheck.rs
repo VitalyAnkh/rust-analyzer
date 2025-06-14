@@ -133,10 +133,10 @@ impl FlycheckHandle {
         let actor =
             FlycheckActor::new(id, sender, config, sysroot_root, workspace_root, manifest_path);
         let (sender, receiver) = unbounded::<StateChange>();
-        let thread = stdx::thread::Builder::new(stdx::thread::ThreadIntent::Worker)
-            .name("Flycheck".to_owned())
-            .spawn(move || actor.run(receiver))
-            .expect("failed to spawn thread");
+        let thread =
+            stdx::thread::Builder::new(stdx::thread::ThreadIntent::Worker, format!("Flycheck{id}"))
+                .spawn(move || actor.run(receiver))
+                .expect("failed to spawn thread");
         FlycheckHandle { id, sender, _thread: thread }
     }
 
@@ -470,7 +470,11 @@ impl FlycheckActor {
                 let mut cmd =
                     toolchain::command(Tool::Cargo.path(), &*self.root, &options.extra_env);
                 if let Some(sysroot_root) = &self.sysroot_root {
-                    cmd.env("RUSTUP_TOOLCHAIN", AsRef::<std::path::Path>::as_ref(sysroot_root));
+                    if !options.extra_env.contains_key("RUSTUP_TOOLCHAIN")
+                        && std::env::var_os("RUSTUP_TOOLCHAIN").is_none()
+                    {
+                        cmd.env("RUSTUP_TOOLCHAIN", AsRef::<std::path::Path>::as_ref(sysroot_root));
+                    }
                 }
                 cmd.arg(command);
 

@@ -53,8 +53,8 @@ pub(crate) fn type_mismatch(ctx: &DiagnosticsContext<'_>, d: &hir::TypeMismatch)
         display_range,
     )
     .with_fixes(fixes(ctx, d));
-    if diag.fixes.is_none() {
-        diag.experimental = true;
+    if diag.fixes.is_some() {
+        diag.experimental = false;
     }
     diag
 }
@@ -195,7 +195,7 @@ fn remove_unnecessary_wrapper(
     let db = ctx.sema.db;
     let root = db.parse_or_expand(expr_ptr.file_id);
     let expr = expr_ptr.value.to_node(&root);
-    let expr = ctx.sema.original_ast_node(expr.clone())?;
+    let expr = ctx.sema.original_ast_node(expr)?;
 
     let Expr::CallExpr(call_expr) = expr else {
         return None;
@@ -306,10 +306,9 @@ fn str_ref_to_owned(
     acc: &mut Vec<Assist>,
 ) -> Option<()> {
     let expected = d.expected.display(ctx.sema.db, ctx.display_target);
-    let actual = d.actual.display(ctx.sema.db, ctx.display_target);
-
     // FIXME do this properly
-    if expected.to_string() != "String" || actual.to_string() != "&str" {
+    let is_applicable = d.actual.strip_reference().is_str() && expected.to_string() == "String";
+    if !is_applicable {
         return None;
     }
 
@@ -1176,7 +1175,7 @@ trait B {}
 
 fn test(a: &dyn A) -> &dyn B {
     a
-  //^ error: expected &dyn B, found &dyn A
+  //^ error: expected &(dyn B + 'static), found &(dyn A + 'static)
 }
 "#,
         );
@@ -1242,6 +1241,20 @@ fn foo(v: &Enum) {
     let <() as Trait>::Assoc::Variant = v;
 }
     "#,
+        );
+    }
+
+    #[test]
+    fn regression_19844() {
+        check_diagnostics(
+            r#"
+fn main() {
+    struct S {}
+    enum E { V() }
+    let E::V() = &S {};
+     // ^^^^^^ error: expected S, found E
+}
+"#,
         );
     }
 }
