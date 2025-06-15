@@ -25,7 +25,7 @@ use syntax::TextRange;
 use triomphe::Arc;
 
 use crate::{
-    Adjust, Adjustment, AutoBorrow, CallableDefId, TyBuilder, TyExt,
+    Adjust, Adjustment, AutoBorrow, CallableDefId, TraitEnvironment, TyBuilder, TyExt,
     consteval::ConstEvalError,
     db::{HirDatabase, InternedClosure, InternedClosureId},
     display::{DisplayTarget, HirDisplay, hir_display_with_store},
@@ -48,6 +48,8 @@ use crate::{
     utils::ClosureSubst,
 };
 
+use super::OperandKind;
+
 mod as_place;
 mod pattern_matching;
 
@@ -66,17 +68,18 @@ struct DropScope {
     locals: Vec<LocalId>,
 }
 
-struct MirLowerCtx<'a> {
+struct MirLowerCtx<'db> {
     result: MirBody,
     owner: DefWithBodyId,
     current_loop_blocks: Option<LoopBlocks>,
     labeled_loop_blocks: FxHashMap<LabelId, LoopBlocks>,
     discr_temp: Option<Place>,
-    db: &'a dyn HirDatabase,
-    body: &'a Body,
-    infer: &'a InferenceResult,
-    resolver: Resolver,
+    db: &'db dyn HirDatabase,
+    body: &'db Body,
+    infer: &'db InferenceResult,
+    resolver: Resolver<'db>,
     drop_scopes: Vec<DropScope>,
+    env: Arc<TraitEnvironment>,
 }
 
 // FIXME: Make this smaller, its stored in database queries
@@ -286,6 +289,7 @@ impl<'ctx> MirLowerCtx<'ctx> {
             closures: vec![],
         };
         let resolver = owner.resolver(db);
+        let env = db.trait_environment_for_body(owner);
 
         MirLowerCtx {
             result: mir,
@@ -298,6 +302,7 @@ impl<'ctx> MirLowerCtx<'ctx> {
             labeled_loop_blocks: Default::default(),
             discr_temp: None,
             drop_scopes: vec![DropScope::default()],
+            env,
         }
     }
 
@@ -324,7 +329,7 @@ impl<'ctx> MirLowerCtx<'ctx> {
         let Some((p, current)) = self.lower_expr_as_place(current, expr_id, true)? else {
             return Ok(None);
         };
-        Ok(Some((Operand::Copy(p), current)))
+        Ok(Some((Operand { kind: OperandKind::Copy(p), span: Some(expr_id.into()) }, current)))
     }
 
     fn lower_expr_to_place_with_adjust(
@@ -347,7 +352,12 @@ impl<'ctx> MirLowerCtx<'ctx> {
                     else {
                         return Ok(None);
                     };
-                    self.push_assignment(current, place, Operand::Copy(p).into(), expr_id.into());
+                    self.push_assignment(
+                        current,
+                        place,
+                        Operand { kind: OperandKind::Copy(p), span: None }.into(),
+                        expr_id.into(),
+                    );
                     Ok(Some(current))
                 }
                 Adjust::Borrow(AutoBorrow::Ref(_, m) | AutoBorrow::RawPtr(m)) => {
@@ -371,7 +381,7 @@ impl<'ctx> MirLowerCtx<'ctx> {
                         place,
                         Rvalue::Cast(
                             CastKind::PointerCoercion(*cast),
-                            Operand::Copy(p),
+                            Operand { kind: OperandKind::Copy(p), span: None },
                             last.target.clone(),
                         ),
                         expr_id.into(),
@@ -476,7 +486,7 @@ impl<'ctx> MirLowerCtx<'ctx> {
                         self.push_assignment(
                             current,
                             place,
-                            Operand::Copy(temp).into(),
+                            Operand { kind: OperandKind::Copy(temp), span: None }.into(),
                             expr_id.into(),
                         );
                         Ok(Some(current))
@@ -517,21 +527,23 @@ impl<'ctx> MirLowerCtx<'ctx> {
                         self.push_assignment(
                             current,
                             place,
-                            Operand::Constant(
-                                ConstData {
-                                    ty,
-                                    value: chalk_ir::ConstValue::BoundVar(BoundVar::new(
-                                        DebruijnIndex::INNERMOST,
-                                        generics.type_or_const_param_idx(p.into()).ok_or(
-                                            MirLowerError::TypeError(
-                                                "fail to lower const generic param",
-                                            ),
-                                        )?,
-                                    )),
-                                }
-                                .intern(Interner),
-                            )
-                            .into(),
+                            Rvalue::from(Operand {
+                                kind: OperandKind::Constant(
+                                    ConstData {
+                                        ty,
+                                        value: chalk_ir::ConstValue::BoundVar(BoundVar::new(
+                                            DebruijnIndex::INNERMOST,
+                                            generics.type_or_const_param_idx(p.into()).ok_or(
+                                                MirLowerError::TypeError(
+                                                    "fail to lower const generic param",
+                                                ),
+                                            )?,
+                                        )),
+                                    }
+                                    .intern(Interner),
+                                ),
+                                span: None,
+                            }),
                             expr_id.into(),
                         );
                         Ok(Some(current))
@@ -876,7 +888,7 @@ impl<'ctx> MirLowerCtx<'ctx> {
                                                 })),
                                                 &mut self.result.projection_store,
                                             );
-                                            Operand::Copy(p)
+                                            Operand { kind: OperandKind::Copy(p), span: None }
                                         }
                                     })
                                     .collect(),
@@ -935,10 +947,7 @@ impl<'ctx> MirLowerCtx<'ctx> {
                     let cast_kind = if source_ty.as_reference().is_some() {
                         CastKind::PointerCoercion(PointerCast::ArrayToPointer)
                     } else {
-                        let mut table = InferenceTable::new(
-                            self.db,
-                            self.db.trait_environment_for_body(self.owner),
-                        );
+                        let mut table = InferenceTable::new(self.db, self.env.clone());
                         cast_kind(&mut table, &source_ty, &target_ty)?
                     };
 
@@ -979,7 +988,12 @@ impl<'ctx> MirLowerCtx<'ctx> {
                 else {
                     return Ok(None);
                 };
-                self.push_assignment(current, place, Operand::Copy(p).into(), expr_id.into());
+                self.push_assignment(
+                    current,
+                    place,
+                    Operand { kind: OperandKind::Copy(p), span: None }.into(),
+                    expr_id.into(),
+                );
                 Ok(Some(current))
             }
             Expr::UnaryOp {
@@ -1056,8 +1070,11 @@ impl<'ctx> MirLowerCtx<'ctx> {
                     else {
                         return Ok(None);
                     };
-                    let r_value =
-                        Rvalue::CheckedBinaryOp(op.into(), Operand::Copy(lhs_place), rhs_op);
+                    let r_value = Rvalue::CheckedBinaryOp(
+                        op.into(),
+                        Operand { kind: OperandKind::Copy(lhs_place), span: None },
+                        rhs_op,
+                    );
                     self.push_assignment(current, lhs_place, r_value, expr_id.into());
                     return Ok(Some(current));
                 }
@@ -1232,9 +1249,11 @@ impl<'ctx> MirLowerCtx<'ctx> {
                                 Rvalue::Ref(*bk, p),
                                 capture_spans[0],
                             );
-                            operands.push(Operand::Move(tmp));
+                            operands.push(Operand { kind: OperandKind::Move(tmp), span: None });
                         }
-                        CaptureKind::ByValue => operands.push(Operand::Move(p)),
+                        CaptureKind::ByValue => {
+                            operands.push(Operand { kind: OperandKind::Move(p), span: None })
+                        }
                     }
                 }
                 self.push_assignment(
@@ -1393,11 +1412,8 @@ impl<'ctx> MirLowerCtx<'ctx> {
     }
 
     fn lower_literal_to_operand(&mut self, ty: Ty, l: &Literal) -> Result<Operand> {
-        let size = || {
-            self.db
-                .layout_of_ty(ty.clone(), self.db.trait_environment_for_body(self.owner))
-                .map(|it| it.size.bytes_usize())
-        };
+        let size =
+            || self.db.layout_of_ty(ty.clone(), self.env.clone()).map(|it| it.size.bytes_usize());
         const USIZE_SIZE: usize = size_of::<usize>();
         let bytes: Box<[_]> = match l {
             hir_def::hir::Literal::String(b) => {
@@ -1476,7 +1492,7 @@ impl<'ctx> MirLowerCtx<'ctx> {
                 .const_eval(const_id, subst, None)
                 .map_err(|e| MirLowerError::ConstEvalError(name.into(), Box::new(e)))?
         };
-        Ok(Operand::Constant(c))
+        Ok(Operand { kind: OperandKind::Constant(c), span: None })
     }
 
     fn write_bytes_to_place(
@@ -1704,7 +1720,12 @@ impl<'ctx> MirLowerCtx<'ctx> {
     }
 
     fn is_uninhabited(&self, expr_id: ExprId) -> bool {
-        is_ty_uninhabited_from(self.db, &self.infer[expr_id], self.owner.module(self.db))
+        is_ty_uninhabited_from(
+            self.db,
+            &self.infer[expr_id],
+            self.owner.module(self.db),
+            self.env.clone(),
+        )
     }
 
     /// This function push `StorageLive` statement for the binding, and applies changes to add `StorageDead` and
@@ -1901,11 +1922,14 @@ impl<'ctx> MirLowerCtx<'ctx> {
                 let edition = self.edition();
                 let db = self.db;
                 let loc = variant.lookup(db);
-                let enum_loc = loc.parent.lookup(db);
                 let name = format!(
                     "{}::{}",
-                    enum_loc.id.item_tree(db)[enum_loc.id.value].name.display(db, edition),
-                    loc.id.item_tree(db)[loc.id.value].name.display(db, edition),
+                    self.db.enum_signature(loc.parent).name.display(db, edition),
+                    loc.parent
+                        .enum_variants(self.db)
+                        .variant_name_by_id(variant)
+                        .unwrap()
+                        .display(db, edition),
                 );
                 Err(MirLowerError::ConstEvalError(name.into(), Box::new(e)))
             }
@@ -2131,7 +2155,7 @@ pub fn mir_body_query(db: &dyn HirDatabase, def: DefWithBodyId) -> Result<Arc<Mi
             .to_string(),
         DefWithBodyId::VariantId(it) => {
             let loc = it.lookup(db);
-            db.enum_variants(loc.parent).variants[loc.index as usize]
+            loc.parent.enum_variants(db).variants[loc.index as usize]
                 .1
                 .display(db, edition)
                 .to_string()
@@ -2161,7 +2185,7 @@ pub fn lower_to_mir(
     // need to take this input explicitly.
     root_expr: ExprId,
 ) -> Result<MirBody> {
-    if infer.type_mismatches().next().is_some() {
+    if infer.type_mismatches().next().is_some() || infer.is_erroneous() {
         return Err(MirLowerError::HasErrors);
     }
     let mut ctx = MirLowerCtx::new(db, owner, body, infer);

@@ -2,7 +2,7 @@
 //! for incorporating changes.
 // Note, don't remove any public api from this. This API is consumed by external tools
 // to run rust-analyzer as a library.
-use std::{collections::hash_map::Entry, mem, path::Path, sync};
+use std::{any::Any, collections::hash_map::Entry, mem, path::Path, sync};
 
 use crossbeam_channel::{Receiver, unbounded};
 use hir_expand::proc_macro::{
@@ -292,7 +292,7 @@ impl ProjectFolders {
             };
 
             let file_set_roots = vec![VfsPath::from(ratoml_path.to_owned())];
-            let entry = vfs::loader::Entry::Files(vec![ratoml_path.to_owned()]);
+            let entry = vfs::loader::Entry::Files(vec![ratoml_path]);
 
             res.watch.push(res.load.len());
             res.load.push(entry);
@@ -514,7 +514,7 @@ impl ProcMacroExpander for Expander {
     }
 
     fn eq_dyn(&self, other: &dyn ProcMacroExpander) -> bool {
-        other.as_any().downcast_ref::<Self>().is_some_and(|other| self == other)
+        (other as &dyn Any).downcast_ref::<Self>() == Some(self)
     }
 }
 

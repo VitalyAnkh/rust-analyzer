@@ -18,8 +18,8 @@ use crate::{
 };
 
 use super::{
-    AggregateKind, BasicBlockId, BorrowKind, LocalId, MirBody, MutBorrowKind, Operand, Place,
-    Rvalue, UnOp,
+    AggregateKind, BasicBlockId, BorrowKind, LocalId, MirBody, MutBorrowKind, Operand, OperandKind,
+    Place, Rvalue, UnOp,
 };
 
 macro_rules! w {
@@ -63,16 +63,16 @@ impl MirBody {
             }
             hir_def::DefWithBodyId::VariantId(id) => {
                 let loc = id.lookup(db);
-                let enum_loc = loc.parent.lookup(db);
+                let edition = this.display_target.edition;
                 w!(
                     this,
                     "enum {}::{} = ",
-                    enum_loc.id.item_tree(db)[enum_loc.id.value]
-                        .name
-                        .display(db, this.display_target.edition),
-                    loc.id.item_tree(db)[loc.id.value]
-                        .name
-                        .display(db, this.display_target.edition),
+                    db.enum_signature(loc.parent).name.display(db, edition),
+                    loc.parent
+                        .enum_variants(db)
+                        .variant_name_by_id(id)
+                        .unwrap()
+                        .display(db, edition),
                 )
             }
         });
@@ -336,7 +336,7 @@ impl<'a> MirPrettyCtx<'a> {
                             w!(
                                 this,
                                 " as {}).{}",
-                                this.db.enum_variants(loc.parent).variants[loc.index as usize]
+                                loc.parent.enum_variants(this.db).variants[loc.index as usize]
                                     .1
                                     .display(this.db, this.display_target.edition),
                                 name.display(this.db, this.display_target.edition)
@@ -374,14 +374,14 @@ impl<'a> MirPrettyCtx<'a> {
     }
 
     fn operand(&mut self, r: &Operand) {
-        match r {
-            Operand::Copy(p) | Operand::Move(p) => {
+        match &r.kind {
+            OperandKind::Copy(p) | OperandKind::Move(p) => {
                 // MIR at the time of writing doesn't have difference between move and copy, so we show them
                 // equally. Feel free to change it.
                 self.place(p);
             }
-            Operand::Constant(c) => w!(self, "Const({})", self.hir_display(c)),
-            Operand::Static(s) => w!(self, "Static({:?})", s),
+            OperandKind::Constant(c) => w!(self, "Const({})", self.hir_display(c)),
+            OperandKind::Static(s) => w!(self, "Static({:?})", s),
         }
     }
 

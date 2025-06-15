@@ -1,6 +1,6 @@
 //! MIR lowering for places
 
-use crate::mir::MutBorrowKind;
+use crate::mir::{MutBorrowKind, Operand, OperandKind};
 
 use super::*;
 use hir_def::FunctionId;
@@ -155,7 +155,7 @@ impl MirLowerCtx<'_> {
                         self.push_assignment(
                             current,
                             temp,
-                            Operand::Static(s).into(),
+                            Operand { kind: OperandKind::Static(s), span: None }.into(),
                             expr_id.into(),
                         );
                         Ok(Some((
@@ -297,15 +297,12 @@ impl MirLowerCtx<'_> {
         let result_ref = TyKind::Ref(mutability, error_lifetime(), result_ty).intern(Interner);
         let mut result: Place = self.temp(result_ref, current, span)?.into();
         let index_fn_op = Operand::const_zst(
-            TyKind::FnDef(
-                self.db.intern_callable_def(CallableDefId::FunctionId(index_fn.0)).into(),
-                index_fn.1,
-            )
-            .intern(Interner),
+            TyKind::FnDef(CallableDefId::FunctionId(index_fn.0).to_chalk(self.db), index_fn.1)
+                .intern(Interner),
         );
         let Some(current) = self.lower_call(
             index_fn_op,
-            Box::new([Operand::Copy(place), index_operand]),
+            Box::new([Operand { kind: OperandKind::Copy(place), span: None }, index_operand]),
             result,
             current,
             false,
@@ -357,7 +354,7 @@ impl MirLowerCtx<'_> {
             .ok_or(MirLowerError::LangItemNotFound(trait_lang_item))?;
         let deref_fn_op = Operand::const_zst(
             TyKind::FnDef(
-                self.db.intern_callable_def(CallableDefId::FunctionId(deref_fn)).into(),
+                CallableDefId::FunctionId(deref_fn).to_chalk(self.db),
                 Substitution::from1(Interner, source_ty),
             )
             .intern(Interner),
@@ -365,7 +362,7 @@ impl MirLowerCtx<'_> {
         let mut result: Place = self.temp(target_ty_ref, current, span)?.into();
         let Some(current) = self.lower_call(
             deref_fn_op,
-            Box::new([Operand::Copy(ref_place)]),
+            Box::new([Operand { kind: OperandKind::Copy(ref_place), span: None }]),
             result,
             current,
             false,

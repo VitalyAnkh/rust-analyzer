@@ -658,6 +658,9 @@ pub(crate) fn handle_workspace_symbol(
         if libs {
             q.libs();
         }
+        if config.search_exclude_imports {
+            q.exclude_imports();
+        }
         q
     };
     let mut res = exec_query(&snap, query, config.search_limit)?;
@@ -1439,7 +1442,7 @@ pub(crate) fn handle_code_action(
     };
     let assists = snap.analysis.assists_with_fixes(
         &assists_config,
-        &snap.config.diagnostics(Some(source_root)),
+        &snap.config.diagnostic_fixes(Some(source_root)),
         resolve,
         frange,
     )?;
@@ -1530,7 +1533,7 @@ pub(crate) fn handle_code_action_resolve(
 
     let assists = snap.analysis.assists_with_fixes(
         &assists_config,
-        &snap.config.diagnostics(Some(source_root)),
+        &snap.config.diagnostic_fixes(Some(source_root)),
         AssistResolveStrategy::Single(assist_resolve),
         frange,
     )?;
@@ -2210,7 +2213,7 @@ fn runnable_action_links(
         let label = update_test.label();
         if let Some(r) = to_proto::make_update_runnable(&r, update_test) {
             let update_command = to_proto::command::run_single(&r, label.unwrap().as_str());
-            group.commands.push(to_command_link(update_command, r.label.clone()));
+            group.commands.push(to_command_link(update_command, r.label));
         }
     }
 

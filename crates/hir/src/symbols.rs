@@ -1,5 +1,6 @@
 //! File symbol extraction.
 
+use base_db::FxIndexSet;
 use either::Either;
 use hir_def::{
     AdtId, AssocItemId, Complete, DefWithBodyId, ExternCrateId, HasModule, ImplId, Lookup, MacroId,
@@ -13,15 +14,13 @@ use hir_def::{
 use hir_expand::{HirFileId, name::Name};
 use hir_ty::{
     db::HirDatabase,
-    display::{DisplayTarget, HirDisplay, hir_display_with_store},
+    display::{HirDisplay, hir_display_with_store},
 };
 use intern::Symbol;
 use rustc_hash::FxHashMap;
 use syntax::{AstNode, AstPtr, SmolStr, SyntaxNode, SyntaxNodePtr, ToSmolStr, ast::HasName};
 
-use crate::{Module, ModuleDef, Semantics};
-
-pub type FxIndexSet<T> = indexmap::IndexSet<T, std::hash::BuildHasherDefault<rustc_hash::FxHasher>>;
+use crate::{HasCrate, Module, ModuleDef, Semantics};
 
 /// The actual data that is stored in the index. It should be as compact as
 /// possible.
@@ -34,6 +33,7 @@ pub struct FileSymbol {
     /// Whether this symbol is a doc alias for the original symbol.
     pub is_alias: bool,
     pub is_assoc: bool,
+    pub is_import: bool,
     pub do_not_complete: Complete,
 }
 
@@ -66,7 +66,6 @@ pub struct SymbolCollector<'a> {
     symbols: FxIndexSet<FileSymbol>,
     work: Vec<SymbolCollectorWork>,
     current_container_name: Option<SmolStr>,
-    display_target: DisplayTarget,
 }
 
 /// Given a [`ModuleId`] and a [`HirDatabase`], use the DefMap for the module's crate to collect
@@ -78,10 +77,6 @@ impl<'a> SymbolCollector<'a> {
             symbols: Default::default(),
             work: Default::default(),
             current_container_name: None,
-            display_target: DisplayTarget::from_crate(
-                db,
-                *db.all_crates().last().expect("no crate graph present"),
-            ),
         }
     }
 
@@ -93,8 +88,7 @@ impl<'a> SymbolCollector<'a> {
 
     pub fn collect(&mut self, module: Module) {
         let _p = tracing::info_span!("SymbolCollector::collect", ?module).entered();
-        tracing::info!(?module, "SymbolCollector::collect",);
-        self.display_target = module.krate().to_display_target(self.db);
+        tracing::info!(?module, "SymbolCollector::collect");
 
         // The initial work is the root module we're collecting, additional work will
         // be populated as we traverse the module's definitions.
@@ -171,6 +165,7 @@ impl<'a> SymbolCollector<'a> {
 
         let is_explicit_import = |vis| match vis {
             Visibility::Public => true,
+            Visibility::PubCrate(_) => true,
             Visibility::Module(_, VisibilityExplicitness::Explicit) => true,
             Visibility::Module(_, VisibilityExplicitness::Implicit) => false,
         };
@@ -203,6 +198,7 @@ impl<'a> SymbolCollector<'a> {
                 loc: dec_loc,
                 is_alias: false,
                 is_assoc: false,
+                is_import: true,
                 do_not_complete: Complete::Yes,
             });
         };
@@ -233,6 +229,7 @@ impl<'a> SymbolCollector<'a> {
                     loc: dec_loc,
                     is_alias: false,
                     is_assoc: false,
+                    is_import: false,
                     do_not_complete: Complete::Yes,
                 });
             };
@@ -321,11 +318,14 @@ impl<'a> SymbolCollector<'a> {
         let impl_data = self.db.impl_signature(impl_id);
         let impl_name = Some(
             hir_display_with_store(impl_data.self_ty, &impl_data.store)
-                .display(self.db, self.display_target)
+                .display(
+                    self.db,
+                    crate::Impl::from(impl_id).krate(self.db).to_display_target(self.db),
+                )
                 .to_smolstr(),
         );
         self.with_container_name(impl_name, |s| {
-            for &(ref name, assoc_item_id) in &self.db.impl_items(impl_id).items {
+            for &(ref name, assoc_item_id) in &impl_id.impl_items(self.db).items {
                 s.push_assoc_item(assoc_item_id, name, None)
             }
         })
@@ -401,6 +401,7 @@ impl<'a> SymbolCollector<'a> {
                     container_name: self.current_container_name.clone(),
                     is_alias: true,
                     is_assoc,
+                    is_import: false,
                     do_not_complete,
                 });
             }
@@ -413,6 +414,7 @@ impl<'a> SymbolCollector<'a> {
             loc: dec_loc,
             is_alias: false,
             is_assoc,
+            is_import: false,
             do_not_complete,
         });
 
@@ -445,6 +447,7 @@ impl<'a> SymbolCollector<'a> {
                     container_name: self.current_container_name.clone(),
                     is_alias: true,
                     is_assoc: false,
+                    is_import: false,
                     do_not_complete,
                 });
             }
@@ -457,6 +460,7 @@ impl<'a> SymbolCollector<'a> {
             loc: dec_loc,
             is_alias: false,
             is_assoc: false,
+            is_import: false,
             do_not_complete,
         });
     }
